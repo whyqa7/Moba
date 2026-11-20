@@ -1,0 +1,91 @@
+name: Build & Release APK
+
+on:
+  push:
+    branches: [main]      # otomatis jalan setiap ada upload/commit ke main
+  workflow_dispatch:       # atau jalankan manual dari tab Actions
+
+permissions:
+  contents: write          # dibutuhkan untuk membuat GitHub Release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Siapkan proyek (ekstrak ZIP otomatis bila perlu)
+        id: prep
+        run: |
+          set -e
+          if [ -f package.json ] && [ -d www ]; then
+            DIR="."
+          else
+            ZIP=$(ls *.zip 2>/dev/null | head -n1 || true)
+            if [ -z "$ZIP" ]; then echo "::error::Tidak ada package.json/www dan tidak ada file .zip di root repo"; exit 1; fi
+            echo "Mengekstrak $ZIP"
+            mkdir -p proj && unzip -q -o "$ZIP" -d proj
+            PJ=$(find proj -maxdepth 3 -name package.json -not -path "*/node_modules/*" | head -n1)
+            if [ -z "$PJ" ]; then echo "::error::package.json tidak ditemukan di dalam ZIP"; exit 1; fi
+            DIR=$(dirname "$PJ")
+          fi
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "Folder proyek: $DIR"
+          ls -la "$DIR" "$DIR/www" | head -40
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install dependencies
+        working-directory: ${{ steps.prep.outputs.dir }}
+        run: npm install
+
+      - name: Generate Android project
+        working-directory: ${{ steps.prep.outputs.dir }}
+        run: npx cap add android
+
+      - name: Paksa mode landscape
+        working-directory: ${{ steps.prep.outputs.dir }}
+        run: |
+          sed -i 's|android:name=".MainActivity"|android:name=".MainActivity" android:screenOrientation="sensorLandscape"|' android/app/src/main/AndroidManifest.xml
+          grep -n "screenOrientation" android/app/src/main/AndroidManifest.xml
+
+      - name: Sync web assets
+        working-directory: ${{ steps.prep.outputs.dir }}
+        run: npx cap sync android
+
+      - name: Build APK (debug-signed, langsung bisa diinstall)
+        working-directory: ${{ steps.prep.outputs.dir }}/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Tentukan nama versi
+        id: ver
+        run: echo "tag=v1.0.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Rename APK
+        run: cp "${{ steps.prep.outputs.dir }}/android/app/build/outputs/apk/debug/app-debug.apk" "LegendasNusantara-${{ steps.ver.outputs.tag }}.apk"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LegendasNusantara-apk
+          path: LegendasNusantara-*.apk
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: Legendas Nusantara ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          files: LegendasNusantara-*.apk
